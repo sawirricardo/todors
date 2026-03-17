@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -34,6 +34,14 @@ struct SubTask {
     created_at: DateTime<Utc>,
     #[serde(default)]
     completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddJsonInput {
+    text: String,
+    #[serde(default)]
+    priority: Option<Priority>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -87,12 +95,14 @@ fn run() -> io::Result<()> {
         print_usage();
         return Ok(());
     };
+    let (as_json, filtered_args) = extract_json_flag(args.collect())?;
+    let mut args = filtered_args.into_iter();
 
     let mut tasks = load_tasks(DATA_FILE)?;
 
     match command.as_str() {
         "add" => {
-            let (text, priority) = parse_add_args(args.collect())?;
+            let (text, priority) = parse_add_input(args.collect())?;
             if text.trim().is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -111,9 +121,27 @@ fn run() -> io::Result<()> {
                 subtasks: Vec::new(),
             });
             save_tasks(DATA_FILE, &tasks)?;
-            println!("Added task {id}");
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "command": "add",
+                        "task_id": id,
+                        "priority": priority.to_string()
+                    })
+                );
+            } else {
+                println!("Added task {id}");
+            }
         }
         "list" => {
+            if as_json {
+                let output = serde_json::to_string_pretty(&tasks).map_err(io::Error::other)?;
+                println!("{output}");
+                return Ok(());
+            }
+
             if tasks.is_empty() {
                 println!("No tasks yet.");
                 return Ok(());
@@ -159,7 +187,18 @@ fn run() -> io::Result<()> {
                 task.completed_at = Some(now_utc());
             }
             save_tasks(DATA_FILE, &tasks)?;
-            println!("Marked task {id} as done");
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "command": "done",
+                        "task_id": id
+                    })
+                );
+            } else {
+                println!("Marked task {id} as done");
+            }
         }
         "remove" => {
             let (id, yes) = parse_remove_args(args.collect())?;
@@ -172,14 +211,37 @@ fn run() -> io::Result<()> {
                 let task_text = tasks[task_index].text.clone();
                 let confirmed = confirm_action(&format!("Delete task {id}: \"{task_text}\"?"))?;
                 if !confirmed {
-                    println!("Canceled.");
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "ok": false,
+                                "command": "remove",
+                                "task_id": id,
+                                "canceled": true
+                            })
+                        );
+                    } else {
+                        println!("Canceled.");
+                    }
                     return Ok(());
                 }
             }
 
             tasks.remove(task_index);
             save_tasks(DATA_FILE, &tasks)?;
-            println!("Removed task {id}");
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "command": "remove",
+                        "task_id": id
+                    })
+                );
+            } else {
+                println!("Removed task {id}");
+            }
         }
         "set-priority" => {
             let id = parse_id(args.next())?;
@@ -190,7 +252,19 @@ fn run() -> io::Result<()> {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "task id not found"))?;
             task.priority = priority;
             save_tasks(DATA_FILE, &tasks)?;
-            println!("Set task {id} priority to {priority}");
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "command": "set-priority",
+                        "task_id": id,
+                        "priority": priority.to_string()
+                    })
+                );
+            } else {
+                println!("Set task {id} priority to {priority}");
+            }
         }
         "reorder" => {
             let id = parse_id(args.next())?;
@@ -223,7 +297,19 @@ fn run() -> io::Result<()> {
                 tasks.insert(target_index, task);
                 save_tasks(DATA_FILE, &tasks)?;
             }
-            println!("Moved task {id} to position {new_position}");
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "command": "reorder",
+                        "task_id": id,
+                        "position": new_position
+                    })
+                );
+            } else {
+                println!("Moved task {id} to position {new_position}");
+            }
         }
         "add-subtask" => {
             let task_id = parse_id(args.next())?;
@@ -255,7 +341,19 @@ fn run() -> io::Result<()> {
                 completed_at: None,
             });
             save_tasks(DATA_FILE, &tasks)?;
-            println!("Added subtask {task_id}.{subtask_id}");
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "command": "add-subtask",
+                        "task_id": task_id,
+                        "subtask_id": subtask_id
+                    })
+                );
+            } else {
+                println!("Added subtask {task_id}.{subtask_id}");
+            }
         }
         "done-subtask" => {
             let task_id = parse_id(args.next())?;
@@ -274,7 +372,19 @@ fn run() -> io::Result<()> {
                 subtask.completed_at = Some(now_utc());
             }
             save_tasks(DATA_FILE, &tasks)?;
-            println!("Marked subtask {task_id}.{subtask_id} as done");
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "command": "done-subtask",
+                        "task_id": task_id,
+                        "subtask_id": subtask_id
+                    })
+                );
+            } else {
+                println!("Marked subtask {task_id}.{subtask_id} as done");
+            }
         }
         "remove-subtask" => {
             let (task_id, subtask_id, yes) = parse_remove_subtask_args(args.collect())?;
@@ -294,17 +404,67 @@ fn run() -> io::Result<()> {
                     "Delete subtask {task_id}.{subtask_id}: \"{subtask_text}\"?"
                 ))?;
                 if !confirmed {
-                    println!("Canceled.");
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "ok": false,
+                                "command": "remove-subtask",
+                                "task_id": task_id,
+                                "subtask_id": subtask_id,
+                                "canceled": true
+                            })
+                        );
+                    } else {
+                        println!("Canceled.");
+                    }
                     return Ok(());
                 }
             }
 
             tasks[task_index].subtasks.remove(subtask_index);
             save_tasks(DATA_FILE, &tasks)?;
-            println!("Removed subtask {task_id}.{subtask_id}");
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "command": "remove-subtask",
+                        "task_id": task_id,
+                        "subtask_id": subtask_id
+                    })
+                );
+            } else {
+                println!("Removed subtask {task_id}.{subtask_id}");
+            }
         }
         "help" | "--help" | "-h" => {
-            print_usage();
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "name": "Rust Todo List",
+                        "usage": [
+                            "todors <command> [args] [--json|-j]",
+                            "todors add [--priority <low|medium|high>] <task text>",
+                            "todors add '{\"text\":\"Task\",\"priority\":\"high\"}'",
+                            "todors add --from-json <json|->",
+                            "todors list",
+                            "todors done <id>",
+                            "todors remove <id> [--yes]",
+                            "todors set-priority <id> <low|medium|high>",
+                            "todors reorder <id> <position>",
+                            "todors add-subtask <task_id> <subtask text>",
+                            "todors done-subtask <task_id> <subtask_id>",
+                            "todors remove-subtask <task_id> <subtask_id> [--yes]",
+                            "todors help"
+                        ]
+                    }))
+                    .map_err(io::Error::other)?
+                );
+            } else {
+                print_usage();
+            }
         }
         _ => {
             return Err(io::Error::new(
@@ -359,7 +519,10 @@ fn print_usage() {
     println!("Rust Todo List");
     println!();
     println!("Usage:");
+    println!("  todors <command> [args] [--json|-j]");
     println!("  todors add [--priority <low|medium|high>] <task text>");
+    println!("  todors add '{{\"text\":\"Task\",\"priority\":\"high\"}}'");
+    println!("  todors add --from-json <json|->");
     println!("  todors list");
     println!("  todors done <id>");
     println!("  todors remove <id> [--yes]");
@@ -377,6 +540,57 @@ fn now_utc() -> DateTime<Utc> {
 
 fn default_priority() -> Priority {
     Priority::Medium
+}
+
+fn parse_add_input(args: Vec<String>) -> io::Result<(String, Priority)> {
+    let mut json_source: Option<String> = None;
+    let mut cli_args: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--from-json" | "--input-json" => {
+                if json_source.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "duplicate --from-json/--input-json flag",
+                    ));
+                }
+
+                let source = args.get(i + 1).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing JSON payload source: use `--from-json <json|->`",
+                    )
+                })?;
+                json_source = Some(source.to_string());
+                i += 2;
+            }
+            token => {
+                cli_args.push(token.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    if let Some(source) = json_source {
+        if !cli_args.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot mix --from-json with text/priority arguments for add",
+            ));
+        }
+        return parse_add_json_source(&source);
+    }
+
+    if cli_args.len() == 1 {
+        let candidate = cli_args[0].trim();
+        if candidate.starts_with('{') && candidate.ends_with('}') {
+            return parse_add_json_payload(candidate);
+        }
+    }
+
+    parse_add_args(cli_args)
 }
 
 fn parse_add_args(args: Vec<String>) -> io::Result<(String, Priority)> {
@@ -404,6 +618,48 @@ fn parse_add_args(args: Vec<String>) -> io::Result<(String, Priority)> {
     }
 
     Ok((text_parts.join(" "), priority))
+}
+
+fn parse_add_json_source(source: &str) -> io::Result<(String, Priority)> {
+    let raw_payload = read_json_source(source)?;
+    parse_add_json_payload(&raw_payload)
+}
+
+fn read_json_source(source: &str) -> io::Result<String> {
+    if source == "-" {
+        let mut stdin_payload = String::new();
+        io::stdin().read_to_string(&mut stdin_payload)?;
+        if stdin_payload.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdin JSON payload is empty",
+            ));
+        }
+        return Ok(stdin_payload);
+    }
+
+    Ok(source.to_string())
+}
+
+fn parse_add_json_payload(raw_payload: &str) -> io::Result<(String, Priority)> {
+    let parsed: AddJsonInput = serde_json::from_str(raw_payload).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid JSON payload for add: {err}"),
+        )
+    })?;
+
+    if parsed.text.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "JSON payload field `text` cannot be empty",
+        ));
+    }
+
+    Ok((
+        parsed.text,
+        parsed.priority.unwrap_or_else(default_priority),
+    ))
 }
 
 fn parse_priority_arg(priority: Option<String>) -> io::Result<Priority> {
@@ -509,4 +765,25 @@ fn confirm_action(prompt: &str) -> io::Result<bool> {
     io::stdin().read_line(&mut input)?;
     let value = input.trim().to_ascii_lowercase();
     Ok(value == "y" || value == "yes")
+}
+
+fn extract_json_flag(args: Vec<String>) -> io::Result<(bool, Vec<String>)> {
+    let mut as_json = false;
+    let mut filtered: Vec<String> = Vec::with_capacity(args.len());
+
+    for arg in args {
+        if arg == "--json" || arg == "-j" {
+            if as_json {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate --json/-j flag",
+                ));
+            }
+            as_json = true;
+        } else {
+            filtered.push(arg);
+        }
+    }
+
+    Ok((as_json, filtered))
 }
